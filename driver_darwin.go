@@ -27,7 +27,6 @@ package oto
 import "C"
 
 import (
-	"context"
 	"fmt"
 	"runtime"
 	"sync"
@@ -43,8 +42,6 @@ type audioInfo struct {
 }
 
 type driver struct {
-	ctx           context.Context
-	cancel        context.CancelFunc
 	audioQueue    C.AudioQueueRef
 	buf           []byte
 	bufSize       int
@@ -58,8 +55,8 @@ type driver struct {
 
 	chWrite   chan []byte
 	chWritten chan int
-
-	m sync.Mutex
+	chStop    chan struct{}
+	m         sync.Mutex
 }
 
 var (
@@ -130,10 +127,7 @@ func newDriver(sampleRate, channelNum, bitDepthInBytes, bufferSizeInBytes int) (
 		nbuf = 2
 	}
 
-	ctx, cancel := context.WithCancel(context.TODO())
 	d := &driver{
-		ctx:        ctx,
-		cancel:     cancel,
 		audioQueue: audioQueue,
 		sampleRate: sampleRate,
 		audioInfo:  audioInfo,
@@ -141,6 +135,7 @@ func newDriver(sampleRate, channelNum, bitDepthInBytes, bufferSizeInBytes int) (
 		buffers:    make([]C.AudioQueueBufferRef, nbuf),
 		chWrite:    make(chan []byte),
 		chWritten:  make(chan int),
+		chStop:     make(chan struct{}),
 	}
 	runtime.SetFinalizer(d, (*driver).Close)
 	// Set the driver before setting the rendering callback.
@@ -187,7 +182,7 @@ func oto_render(inUserData unsafe.Pointer, inAQ C.AudioQueueRef, inBuffer C.Audi
 	defer t.Stop()
 	ch := t.C
 
-	for len(buf) < queueBufferSize && d.ctx.Err() == nil {
+	for len(buf) < queueBufferSize {
 		select {
 		case dbuf := <-d.chWrite:
 			for !d.resume(false) {
@@ -209,8 +204,10 @@ func oto_render(inUserData unsafe.Pointer, inAQ C.AudioQueueRef, inBuffer C.Audi
 		case <-ch:
 			d.pause()
 			ch = nil
-		case <-d.ctx.Done():
-			// AudioQueue was closed, return immediately
+		case _, ok := <-d.chStop:
+			if !ok {
+				return
+			}
 			return
 		}
 	}
@@ -253,7 +250,7 @@ func (d *driver) Close() error {
 	runtime.SetFinalizer(d, nil)
 
 	// notify to close any (oto_render in this case) running progress
-	d.cancel()
+	close(d.chStop)
 
 	if osstatus := C.AudioQueueStop(d.audioQueue, C.false); osstatus != C.noErr {
 		return fmt.Errorf("oto: AudioQueueStop failed: %d", osstatus)
