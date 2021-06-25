@@ -174,4 +174,8 @@ func main() {
 	if err := run(); err != nil {
 		panic(err)
 	}
+	// try again to run in a new context
+	if err := run(); err != nil {
+		panic(err)
+	}
 }
